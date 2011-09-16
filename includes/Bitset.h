@@ -10,10 +10,11 @@ typedef Word Bitset;
 //
 //   Bitset b[BITSET_SIZE(42)];
 
-void printBitset(FILE *, Bitset b[], u4 size);
 
 #include <string.h>
 #include <stdio.h>
+
+void printBitset(FILE *, Bitset b[], u4 size);
 
 INLINE_HEADER void
 clearBitset(Bitset b[], u4 size)
