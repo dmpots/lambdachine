@@ -14,7 +14,9 @@
 #include "Bitset.h"
 #include "Stats.h"
 #include "Opts.h"
+#if LC_HAS_ASM_BACKEND
 #include "AsmCodeGen.h"
+#endif
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -80,8 +82,9 @@ emitIR(JitState *J)
   ir->t = foldIns->t;
   ir->op1 = foldIns->op1;
   ir->op2 = foldIns->op2;
-  DBG_LVL(2, "emitted: %5d ", ref - REF_BIAS);
+  DBG_LVL(2, COL_GREEN "emitted: %5d ", ref - REF_BIAS);
   IF_DBG_LVL(2, printIR(&J->cur, *ir));
+  DBG_LVL(2, COL_RESET);
 
   return TREF(ref, ir->t);
 }
@@ -169,6 +172,7 @@ recordSetup(JitState *J, Thread *T)
   J->cur.nins = REF_BASE;
   J->cur.nk = REF_BASE;
   J->cur.nloop = 0;
+  J->cur.nphis = 0;
   // Emit BASE.  Causes buffer allocation.
   emit_raw(J, IRT(IR_BASE, IRT_PTR), 0, 0);
   J->last_result = 0;
@@ -412,7 +416,13 @@ abortRecording(JitState *J)
   exit(111);
 }
 
-// Record the construction of a stack frame.
+/* Record the construction of a stack frame.
+ *
+ * Returns:
+ *
+ *   - non-zero if recording should continue
+ *   - zero if recording should be aborted (e.g. too many stack frames)
+ */
 LC_FASTCALL int
 recordBuildEvalFrame(JitState *J, TRef node, ThunkInfoTable *info,
                      const BCIns *return_pc)
@@ -425,6 +435,13 @@ recordBuildEvalFrame(JitState *J, TRef node, ThunkInfoTable *info,
 
   if (LC_UNLIKELY(stackOverflow(J->T, top, 8 + framesize)))
     return 0;
+
+  /* DBG_PR("CHECK: %d, %d\n", (top + 8 + framesize - J->startbase), */
+  /*        MAX_SLOTS); */
+  if (LC_UNLIKELY((top + 8 + framesize - J->startbase) >= MAX_SLOTS)) {
+    DBG_PR("ABORT: Frame too deep (EVAL).");
+    return 0;                   /* too many nested stack frames */
+  }
 
   const u2 *liveouts = getLivenessMask(return_pc);
   fprintf(stderr, "LIVES: %p %x\n", return_pc, (int)liveouts);
@@ -625,6 +642,11 @@ recordIns(JitState *J)
 
       if (farity == nargs) {
         // Exact application
+        
+        if (LC_UNLIKELY(J->T->base + info->code.framesize >= J->startbase + MAX_SLOTS)) {
+          DBG_PR("ABORT: Frame too deep.");
+          goto abort_recording;
+        }
 
         // Guard for info table, as usual
         TRef rinfo = emitKWord(J, (Word)info, LIT_INFO);
@@ -653,6 +675,12 @@ recordIns(JitState *J)
         Closure *ap_closure;
         getApContClosure(&ap_closure, &ap_return_pc, extra_args,
                          pointer_mask >> (nargs - extra_args));
+
+        if (LC_UNLIKELY(J->T->base + topslot + 3 + framesize >=
+                        J->startbase + MAX_SLOTS)) {
+          DBG_PR("ABORT: Frame too deep.");
+          goto abort_recording;
+        }
 
         // First the guard
         TRef rinfo = emitKWord(J, (Word)info, LIT_INFO);
@@ -716,6 +744,11 @@ recordIns(JitState *J)
       if (LC_UNLIKELY(stackOverflow(J->T, J->T->top, 3 + framesize)))
         goto abort_recording;
 
+      if (LC_UNLIKELY(J->T->base + topslot + 3 + framesize >= J->startbase + MAX_SLOTS)) {
+        DBG_PR("ABORT: Frame too deep.");
+        goto abort_recording;
+      }
+
       ra = getSlot(J, bc_a(ins));  // The function
 
       setSlot(J, topslot + 0, emitKBaseOffset(J, baseslot));
@@ -754,8 +787,10 @@ recordIns(JitState *J)
 
 
     do_return:
-      if (J->framedepth <= 0)
+      if (J->framedepth <= 0) {
+        DBG_PR("ABORT: Returning outside of original frame.\n");
         goto abort_recording; // for now
+      }
 
       Word return_pc = tbase[-2];
       Word *return_base = (Word*)tbase[-3];
@@ -763,7 +798,10 @@ recordIns(JitState *J)
       int i;
 
       J->framedepth--;
-      if (J->framedepth < 0) goto abort_recording;
+      if (J->framedepth < 0) { 
+        DBG_PR("ABORT: Returning outside of original frame (B).\n");
+        goto abort_recording;
+      }
 
       guardEqualKWord(J, getSlot(J, -2), return_pc, LIT_PC);
 
@@ -942,31 +980,38 @@ finishRecording(JitState *J)
   addSnapshot(J);
   J->cur.nloop = tref_ref(emit_raw(J, IRT(IR_LOOP, IRT_VOID), 0, 0));
   optUnrollLoop(J);
-  optDeadCodeElim(J);
-  heapSCCs(J);
-  optDeadAssignElim(J);
 
-  //  for (i = J->cur.nheap - 1; i >= 0; i--)
-  //    heapSCCs(J, i);
-
-  DBG_PR("*** Stopping to record.\n");
-
-  printPrettyIR(&J->cur, J->nfragments);
 #ifndef NDEBUG
+  printPrettyIR(&J->cur, J->nfragments);
   printIRBuffer(J);
   printHeapInfo(stderr, J);
 #endif
+
+  optDeadCodeElim(J);
+  compactPhis(J);               /* useful for IR interpreter */
+  heapSCCs(J);
+
+  DBG_PR("*** Stopping to record.\n");
+
+#ifndef NDEBUG
+  printPrettyIR(&J->cur, J->nfragments);
+  printIRBuffer(J);
+  printHeapInfo(stderr, J);
+#endif
+
   J->cur.orig = *J->startpc;
   *J->startpc = BCINS_AD(BC_JFUNC, 0, J->nfragments);
   DBG_PR("Overwriting startpc = %p, with: %x\n",
          J->startpc, *J->startpc);
 
+#if LC_HAS_ASM_BACKEND
   if(J->param[JIT_P_enableasm]) {
     //TODO: compute the actual framsize of a trace
     //This number needs to be computed before a call to genAsm
     J->cur.framesize = MAX_SLOTS;
     genAsm(J, &J->cur);
   }
+#endif
   return registerCurrentFragment(J);
 }
 
@@ -1012,6 +1057,7 @@ registerCurrentFragment(JitState *J)
   F->nloop = J->cur.nloop;
   F->ir = xmalloc((F->nins - F->nk) * sizeof(IRIns));
   F->ir = F->ir + F->nk - REF_BIAS;
+  F->nphis = J->cur.nphis;
   memcpy(F->ir + F->nk, J->cur.ir + J->cur.nk,
          (F->nins - F->nk) * sizeof(IRIns));
 

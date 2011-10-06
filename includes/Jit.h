@@ -91,6 +91,7 @@ typedef struct _Fragment {
   IRRef nins;  // Next IR instruction
   IRRef nk;    // Lowest IR literal
   IRRef nloop; // Reference to LOOP instruction (if any)
+  u2 nphis;    // Number of PHI nodes (only needed by IR interpreter)
 
   Word *kwords; // Constant words
   u4 nkwords;
@@ -148,10 +149,11 @@ typedef struct _JitState {
   FuncInfoTable *func;
 
   // Virtual/Recorder State
-  TRef *base;
-  TRef slot[MAX_SLOTS];
-  BCReg baseslot;
-  BCReg maxslot;
+  TRef *base;      // current base pointer as pointer into slots
+  TRef slot[MAX_SLOTS];   // virtual register contents
+  BCReg baseslot;  // current base pointer as offset into slot
+  BCReg maxslot;   // size of the current frame
+                   // INVARIANT: baseslot + maxslot < MAX_SLOTS
   TRef last_result;
   u4 flags;
   u4 mode;
@@ -255,8 +257,8 @@ LC_FASTCALL void optUnrollLoop(JitState *J);
 LC_FASTCALL void optDeadCodeElim(JitState *J);
 LC_FASTCALL void optDeadAssignElim(JitState *J);
 LC_FASTCALL TRef optForward(JitState *J);
+LC_FASTCALL void compactPhis(JitState *J);
 
-LC_FASTCALL IRRef findPhiTwin(JitState *J, IRRef ref);
 void growIRBufferTop(JitState *J);
 
 int irEngine(Capability *cap, Fragment *F);
@@ -298,5 +300,33 @@ INLINE_HEADER void traceError(JitState *J, int n)
 {
   exit(n);
 }
+
+LC_FASTCALL IRRef findPhi_aux(JitState *J, IRRef ref);
+
+// Find the corresponding PHI node for the given target reference.
+//
+// Returns a non-zero result iff [ref] is shadowed by a PHI node.
+// The result is a reference to the PHI node itself.
+INLINE_HEADER IRRef
+findPhi(JitState *J, IRRef ref)
+{
+  if (ref < REF_BIAS || ref >= J->cur.nloop || !irt_getphi(J->cur.ir[ref].t))
+    return 0;
+  
+  return findPhi_aux(J, ref);
+}
+
+// Find the corresponding twin of a referenced involved in a PHI node.
+//
+// Returns a non-zero result iff [ref] is a PHI node.  The returned
+// reference is the PHI twin (i.e., the second argument to the PHI
+// node).
+INLINE_HEADER IRRef
+findPhiTwin(JitState *J, IRRef ref)
+{
+  IRRef ref2 = findPhi(J, ref);
+  return ref != 0 ? J->cur.ir[ref2].op2 : 0;
+}
+
 
 #endif
