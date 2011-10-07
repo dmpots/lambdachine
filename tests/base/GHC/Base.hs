@@ -20,6 +20,10 @@ infixl 1  >>, >>=
 id                      :: a -> a
 id x                    =  x
 
+-- | Constant function.
+const :: a -> b -> a
+const x y = x
+
 class  Monad m  where
     -- | Sequentially compose two actions, passing any value produced
     -- by the first as an argument to the second.

@@ -164,3 +164,13 @@ xs !! (I# n0)
        sub (y:ys) n = if n ==# 0#
                       then y
                       else sub ys (n -# 1#)
+
+----------------------------------------------
+-- | 'zipWith' generalises 'zip' by zipping with the function given
+-- as the first argument, instead of a tupling function.
+-- For example, @'zipWith' (+)@ is applied to two lists to produce the
+-- list of corresponding sums.
+zipWith :: (a->b->c) -> [a]->[b]->[c]
+zipWith f (a:as) (b:bs) = f a b : zipWith f as bs
+zipWith _ _      _      = []
+
